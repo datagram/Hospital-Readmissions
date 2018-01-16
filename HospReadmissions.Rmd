@@ -1,0 +1,420 @@
+---
+author: "Mahim Naveed"
+title: 'Modeling Hospital Readmissions'
+output: 
+  pdf_document:
+    toc: true
+    number_sections: true
+---
+
+\newpage
+
+#Modeling readmission among patients at a medical facility
+
+##Summary
+The goal of the study is to perform an exploratory analysis on the data provided by a home health provider medical facility. The dataset consists of binary, categorical, and ordinal variables and after performing summary statistics it appears that there are some duplicate recors but there are no missing values. After performing some visualizations on the data, a statistical analysis is conducted. For the purpose of this report, a binary variable indicating readmissions is created and is referred to as the response variable in the logistic regression model.  
+
+
+##Data Description
+
+The dataset consists of information on patients who acquired home health care services during the years $2014 - 2016$. The raw data set consisted of $37452$ observations in the home-care excel sheet and $15397$ in the hospitalization records sheet. After removal of duplicate rows and merging the datasets by patient IDs, the observation count came down to $40390$. Among these, $40.2\%$ were male and $59.8\%$ female. Total number of patients was $37421$, out of which which $45.5\%$ were admitted to hospital and $7.4\%$ of these patients got readmitted to hospital during the course of treatment. The table below summarizes some information from the data:
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, cache=TRUE}
+suppressMessages(library(readxl))
+suppressMessages(library(dplyr))
+suppressMessages(library(tidyr))
+suppressMessages(library(lubridate))
+suppressMessages(library(stringr))
+suppressMessages(library(plyr))
+suppressMessages(library(knitr))      
+suppressMessages(library(vcdExtra))
+suppressMessages(library(knitr))
+
+
+#INITIAL SETUP
+
+# reading excel sheets into console
+dat1 <- read_excel("vnsny-exercise-2.xlsx", 2)
+dat2 <- read_excel("vnsny-exercise-2.xlsx", 3)
+
+# get admission & discharge months and years, days under treatment 
+dat1yr <- mutate(dat1, admission_mth = month(ymd(admission_dt)), 
+                 admission_yr = year(ymd(admission_dt)), 
+                 discharge_mth = month(ymd(discharge_dt)) , discharge_yr=year(ymd(discharge_dt)),
+                 days_in_hosp = as.numeric(difftime(dat1$discharge_dt, dat1$admission_dt, units="days")))
+
+dat2yr <- mutate(dat2, hospitalization_mth = month(ymd(hospitalization_dt)), 
+                 hospitalization_yr = year(ymd(hospitalization_dt)))
+
+# remove duplicate rows
+dat1.distinct <- distinct(dat1yr)     #37421 cases, 31 rows removed
+dat2.distinct <- distinct(dat2yr)     #15392 cases, 5 rows removed
+
+# IDs appearing more than once
+id1.dup <- dat1.distinct$patient_id[duplicated(dat1.distinct$patient_id)]
+id2.dup <- dat2.distinct$patient_id[duplicated(dat2.distinct$patient_id)] #2969 cases
+id2.dup.number <- unique(id2.dup) #2536 patients 
+
+# repeated IDs in dat2
+dat2.mult <- filter(dat2.distinct, patient_id %in% id2.dup.number)   #5505 repeated cases
+
+# inner_join datasets
+dat.full <- full_join(dat1.distinct, dat2.distinct, by = "patient_id") %>% 
+                    arrange(patient_id)  #40390 cases
+id.count <- n_distinct(dat.full$patient_id)     #37421 patients
+miss.hosp <- sum(is.na(dat.full$hospitalization_dt)) # 24998 cases not hospitalized
+
+#Capitalize/standardize gender
+capFirst <- function(s){paste(toupper(substring(s, 1, 1)), substring(s, 2), sep = "")}
+dat.full$gender <- capFirst(dat.full$gender)
+
+# gender stats
+dat.gender <- distinct(select(dat.full, patient_id, gender))
+dat.male <- subset(dat.gender, gender=='Male')    #15038 male ~40.2%
+dat.female <- subset(dat.gender, gender=='Female')   #22383 female ~59.8%
+
+
+# get patient counts per year
+dat.adm <- distinct(select(dat.full, patient_id, admission_yr))
+adm.2014 <- subset(dat.adm, admission_yr==2014)    #37421
+adm.count <- dim(distinct(adm.2014))[1]
+
+dat.hosp <- distinct(select(dat.full, patient_id, hospitalization_yr))
+hosp.2014 <- subset(dat.hosp, hospitalization_yr==2014)    #11739
+hosp.2015 <- subset(dat.hosp, hospitalization_yr==2015)    #801
+hosp.count <- paste(c(dim(distinct(hosp.2014))[1], dim(distinct(hosp.2015))[1]), collapse=", " )
+
+dat.disch <- distinct(select(dat.full, patient_id, discharge_yr))
+disch.2014 <- subset(dat.disch, discharge_yr==2014)    #33311
+disch.2015 <- subset(dat.disch, discharge_yr==2015)    #4109
+disch.2016 <- subset(dat.disch, discharge_yr==2016)    #1
+disch.count <- paste(c(dim(distinct(disch.2014))[1], dim(distinct(disch.2015))[1], 
+                       dim(distinct(disch.2016))[1]), collapse=", " )
+
+
+# readmission variable
+dat.full <- as.data.frame(dat.full)
+dat.full$readmit <- rep(0, dim(dat.full)[1])
+for(i in which(duplicated(dat.full$patient_id))){
+dat.full$readmit[i]<-1}
+
+# hospitalized variable
+dat.full$hospitalized <- rep(0, dim(dat.full)[1])
+for(i in which(!is.na(dat.full$hospitalization_dt))){
+dat.full$hospitalized[i]<-1}
+
+# days to hospitalization
+dat.full$days_to_hospitalization <- as.numeric(difftime(dat.full$hospitalization_dt,
+                                                          dat.full$admission_dt, units="days"))
+
+# changing months from numeric to character
+dat.full$admission_mth <- factor(as.numeric(dat.full$admission_mth))
+dat.full$discharge_mth <- factor(as.numeric(dat.full$discharge_mth))
+
+levels(dat.full$discharge_mth) <- levels(dat.full$admission_mth) <- c("January", "February", "March", 
+                                    "April", "May", "June", "July", 
+                                    "August", "September", "October", 
+                                    "November", "December")
+
+# getting admission, hospitalization, discharge information per year
+admission.yrs <- levels(factor(dat.full$admission_yr))     #only 2014
+discharge.yrs <- levels(factor(dat.full$discharge_yr))     #2014, 2015, 2016
+hospitalization.yrs <- levels(factor(dat.full$hospitalization_yr)) #2014 and 2015
+first.last.admission <- c(min(dat.full$admission_dt), max(dat.full$admission_dt)) #2013-12-31, 2014-12-30
+first.last.hospitalization <- c(dat.full[which.min(dat.full$hospitalization_dt), "hospitalization_dt"],
+                                dat.full[which.max(dat.full$hospitalization_dt), "hospitalization_dt"]) 
+                                # 2014-01-01, 2015-08-11
+first.last.discharge <- c(min(dat.full$discharge_dt), max(dat.full$discharge_dt)) #2014-01-01, 2016-01-25
+
+
+
+first.last <-  data.frame(First=c(first.last.admission[1], first.last.hospitalization[1], 
+                                 first.last.discharge[1]),
+                                 Last=c(first.last.admission[2], first.last.hospitalization[2],
+                                        first.last.discharge[2]), 
+                          Years=c(paste(admission.yrs), paste(hospitalization.yrs, collapse=", "),
+                                 paste(discharge.yrs, collapse=", ")),                                                                          "Patient Count per Year"=c(adm.count, hosp.count, disch.count))
+rownames(first.last) <- c("Home-care Admission", "Hospitalization", "Discharge")
+
+
+
+# renaming variables to readable format
+colnames(dat.full) <- c("Admission Date (XYZ)", "Discharge Date", "Patient ID", 
+                        "Gender", "Age", "Hypertension", "Diabetes", "Arthritis",
+                        "Congestive Heart Failure", "Pulmonary Disease", 
+                        "Acute Myocardial Infarction", "Stroke", "Dyspnea Severity",
+                        "Medication Count", "Admission Month (XYZ)", "Admission Year (XYZ)", 
+                        "Discharge Month", "Discharge Year", "Days under treatment", 
+                        "Hospitalization Date", "Hospitalization Month", 
+                        "Hospitalization Year", "Readmission to hospital", "Hospitalized",
+                        "Days to hospitalization")
+
+kable(first.last)
+
+```
+
+All home health-care admissions occured in $2013$. $93.6\%$ of the patients got admitted to hospital in the $2014$ and the remaining $6.4\%$ in $2015$. $89\%$ of the patients were discharged from the program in $2014$, $10.9\%$ in $2015$ and only 1 patient was discharged in $2016$.
+
+##Exploratory Analysis
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.height=2.4, fig.width=3, cache=TRUE}
+#EXPLORATORY ANALYSIS
+suppressMessages(library(ggplot2))
+suppressMessages(library(ggthemes))
+
+p1 <- ggplot(data = dat.full, aes(x=Age)) +
+      geom_histogram() + facet_wrap(~Gender) + 
+      labs(title="Age of incoming patients") +
+      geom_vline(aes(xintercept=mean(Age)), color="black", linetype="dashed", size=0.5) +
+      theme(text = element_text(size=8), plot.title = element_text(size=8)) + theme_tufte()
+
+p2 <- ggplot(data = dat.full, aes(x=Gender, y=`Days under treatment`)) + 
+      geom_boxplot() + labs(title="Days spent under treatment")+ 
+      theme(text = element_text(size=8), plot.title = element_text(size=8)) + theme_tufte()
+
+
+# plot diagnosis stats, remove multiple patient ID info using distinct
+dat.sub <- distinct(select(dat.full, `Patient ID`, Gender,Hypertension,
+                  Diabetes, Arthritis, `Congestive Heart Failure`, `Pulmonary Disease`,
+                  `Acute Myocardial Infarction`, Stroke))
+dat.sub.1 <- select(dat.sub, -`Patient ID`)
+dat.1<- gather(dat.sub.1, Diagnosis, Count, 2:8)
+
+p3 <- ggplot(data=dat.1, aes(x = Diagnosis, y = Count, fill=Gender)) +
+      geom_bar(stat = "identity", width=0.4) +   
+      scale_y_continuous() +  coord_flip() +  
+      labs(title="Diagnosis stats") + theme_tufte() +  
+      theme(text = element_text(size=8), plot.title = element_text(size=10), 
+      axis.ticks = element_blank()) 
+      
+
+# plot dyspnea severity per gender      
+p4 <- ggplot(dat.full, aes(x= `Dyspnea Severity`,  group=Gender)) + 
+      geom_bar(aes(y = ..count..), stat="count") +
+      geom_text(aes(label =  scales::percent(..prop..), y= ..count..), stat= "count", 
+              size=1.5, vjust = -.2) +
+      labs(y = "Count", fill="Dyspnea Severity") +
+      facet_grid(~Gender) + scale_y_continuous() + 
+      theme(text = element_text(size=8), plot.title = element_text(size=8)) +
+      labs(title=("Dyspnea severity levels")) + theme_tufte()
+
+p1
+p4
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.height=2.1, fig.width=3.6, cache=TRUE}
+p3
+p2
+
+```
+
+The plots above provide some insight into the data. It appears that even though there were more female patients than male, the age distribution was very similar for both the genders, with an average age of about 72 years. The lowest reported age was $28$ years and the highest $123$. Since it is not known whether the data is real or simulated, high aged records were not removed from the dataset. Like age, dyspnea severity indices reported for both genders were also similar; the second plot provides percentages for comparison. Among different diagnosis categories, hypertension was common among most patients, followed by diabetes and then arthritis. The average duration of treatment was about $41$ days, where the longest treatment lasted $437$ days. 
+
+##Statistical Analysis
+
+After performing some exploratory visualizations on the data, I decided to model readmissions among the patients. The plots below show that as the duration of treatment increased, readmissions to the hospital decreased. It is also evident that readmissions among female patients decreased faster than among male patients.
+
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, cache=TRUE, fig.height=3.5}
+suppressMessages(library(survival))
+suppressMessages(library(vcdExtra))
+
+par(mfrow=c(1,2))
+# Readmission distribution plot using survival method 
+surv.object <- with(dat.full, Surv(`Days under treatment`, `Readmission to hospital`))
+#head(surv.object)
+readmit.fit <- survfit(surv.object~1, data=dat.full)
+plot(readmit.fit, xlab="Days under treatment", ylab="% Readmission",
+     yscale=100, main="Overall hospital readmissions", cex.lab=0.7, cex.main=0.8)
+
+#per gender
+readmit.fit1 <- survfit(surv.object~Gender,data=dat.full)
+plot(readmit.fit1, xlab="Days under treatment", 
+  ylab="% Readmission", yscale=100, col=c("red","blue"),
+  main="Readmissions by gender", cex.lab=0.7, cex.main=0.8) 
+  legend("topright", cex=0.5, title="Gender", c("Male", "Female"),
+  fill=c("red", "blue"))
+```
+
+In order to evaluate the factors predictive of readmission to the hospital, logistic regression is applied, given binary outcome (readmission). Before proceeding to data modeling, let's take a look at correlation between predictor variables. The correlogram below displays positive correlations in blue and negative correlations in red color. Color intensity and the size of the circle are proportional to the correlation coefficients. 
+
+None of the diagnosis categories appear to be correlated except for diabetes and hypertension. There are no highly correlated predictors so it is safe to include all the variables. If the number of predictors was very large, variance inflation factor could be used to select suitable variables for analysis.
+
+Since correlation between diabetes and hypertension is very little, for the purpose of this report, an assumption of non-multicollinearity is made.
+
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, cache=TRUE, fig.height=4.2}
+#Correlation among predictors
+
+library(corrplot)
+dat.test <- distinct(select(dat.full, `Patient ID`, Hypertension, Diabetes, Arthritis, `Congestive Heart Failure`,
+                            `Pulmonary Disease`, `Acute Myocardial Infarction`, Stroke, `Dyspnea Severity`,
+                            `Medication Count`))
+dat.test <- select(dat.test, -`Patient ID`)
+
+corr.matrix<- cor(dat.test, method = "pearson", use = "complete.obs")
+
+corrplot(corr.matrix, type = "upper", order = "hclust", 
+         tl.col = "black", tl.srt = 45)
+
+#View(corr.matrix)
+```
+
+Assuming response outcomes (hospital readmission) are binary, the independent variables are not linear combinations of each other, and cases are independent, the following logistic model is set up:
+
+$$Probability \ distribution: \ \ \ \ \ y_{i} \sim Bern \left( p_{i} \right)$$
+$$Model: \ \ \ \ logit \left(p_i \right) = \beta_0 + \beta_1 X_{gender} + \beta_2 X_{age} + \beta_3 X_{hyp} + \beta_4 X_{diab} + \beta_5 X_{arth} + \beta_6X_{chf} + \beta_7 X_{pd} +$$
+$$\beta_8 X_{ami} + \beta_9X_{str} + \beta_{10} X_{dysp} + \beta_{11}X_{med} + \beta_{12}X_{days}, $$
+
+$$Link \ function: \ \ \ \ \ g(E[Y|X]) = g(p) = logit(p) = log\frac{p}{1-p}.$$
+
+
+
+The performance of this model was compared with a 2-way interaction model (keeping gender as interaction term), but the AIC value was lower for the model without interactions, hence the above mentioned model was used. The odds ratios resulting from the model are acquired by exponentiating the beta estimates and are as follows:
+
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, cache=TRUE}
+# Logistic Regression Model
+
+#readmission
+mod.readmit.basic <- glm(`Readmission to hospital`~ Gender + Age  + Hypertension + Diabetes +
+                           Arthritis + `Congestive Heart Failure` + `Pulmonary Disease` + 
+                           `Acute Myocardial Infarction` + Stroke + `Dyspnea Severity` +
+                        `Medication Count` + `Days under treatment`,
+                data=dat.full, family=binomial(link="logit"))
+
+mod.readmit <- glm(`Readmission to hospital`~Gender + Age  + Diabetes:Gender + Arthritis:Gender+
+                        `Congestive Heart Failure`:Gender + `Pulmonary Disease`:Gender + 
+                        `Acute Myocardial Infarction`:Gender + Stroke:Gender + `Dyspnea Severity`:Gender+
+                        `Medication Count`:Gender,
+                data=dat.full, family=binomial(link="logit"))
+
+readmit.lrstats <- LRstats(glmlist(mod.readmit.basic, mod.readmit))
+#choose mod.readmit.basic model, 2 way interaction does not improve results given lower AIC and BIC
+
+readmit.estimates <- data.frame(summary(mod.readmit.basic)$coefficients[,c(1,4)])
+readmit.odds<-data.frame(readmit.estimates, Odds.Ratio=exp(readmit.estimates[,1]))
+readmit.odds$Estimate <- round(readmit.odds$Estimate,3)
+readmit.odds$Odds.Ratio <- round(readmit.odds$Odds.Ratio,3)
+#t(hosp.odds)
+#summary(mod.readmit)
+#summary(mod.hosp)
+
+```
+
+
+
+Resp | Int|Male|Age|Hyp|Diab|Arth|CHF|PD|AMI|Stroke|Dysp Sev|Med Ct|Days Tr|
+-------|-----|-----|-----|-----|-----|-----|-----|-----|-----|-----|------|------|------|
+Readmit|0.03|1.56|1.003|1.41|1.453|0.816|1.90|1.178|0.942|1.289|1.063|1.028|1.00|
+-------|----|----|-----|----|-----|-----|----|-----|-----|-----|-----|-----|-----|
+p-Value| * | * |  | * | * | * | * | * |  | * | * | * | |
+
+The asterisks denote that the value is less than 0.05. From the results above we can say that according to p-values set at a significance level of 0.05, age, acute myocardial infarction and the number of days under treatment were insignificant predictors of readmission. 
+
+Male patients were 56% more likely to get readmitted than female. Patients who had hypertension were 41% more likely to get readmitted than than those who did not have hypertension. Patients who were diabetic were 45.3% more likely to get readmitted than than those who were not diabetic. Patients who had arthritis were 18.4% less likely to get readmitted than those who did not have arthritis. Patients who had a pulmonary disease diagnosis were 17.9% more likely to get readmitted than those who did not have it. Having a congestive heart failure history increased the odds of getting readmitted by 90%. Patients who had reported a stroke incident were 28.9% more likely to get readmitted than those who had not. For each level increase in dyspnea index, the odds of readmission increased by 6.3%. For a unit increase in number of present precriptions, the odds of getting readmitted increased by 2.8%. 
+
+
+##Conclusion
+
+Different approaches can be applied to a data set of this sort. I decided to analyze readmissions by creating a binary indicator variable for every patient who got hospitalized more than once. This helped evaluate factors that could lead to getting readmitted. In camparison to all other predictors, having a history of congestive heart failure increased the odds of getting readmitted the most.
+
+
+\newpage
+
+#Appendix
+
+##Descriptive statistics
+
+###Binary predictors
+
+**Hypertension**
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, cache=TRUE}
+
+
+dat.describe <- dat.full[, c(4:15,19,23:25)]
+dat.describe$Gender <- relevel(factor(dat.describe$Gender), ref='Male')
+
+descriptive <- function(Status){
+ cross<-xtabs(~Gender+`Status`, data=dat.describe) 
+ per <- paste(round(prop.table(cross)*100,2), "%")
+ sum <- data.frame(cross, "Percent"=per)
+ print(sum)
+}
+
+descriptive(dat.describe$Hypertension)
+
+```
+
+**Diabetes**
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, cache=TRUE}
+descriptive(dat.describe$Diabetes)
+```
+
+
+**Arthritis**
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, cache=TRUE}
+descriptive(dat.describe$Arthritis)
+```
+
+**Congestive Heart Failure**
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, cache=TRUE}
+descriptive(dat.describe$`Congestive Heart Failure`)
+```
+
+**Acute Myocardial Infarction**
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, cache=TRUE}
+descriptive(dat.describe$`Acute Myocardial Infarction`)
+```
+
+**Stroke**
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, cache=TRUE}
+descriptive(dat.describe$Stroke)
+```
+
+**Hospitalized**
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, cache=TRUE}
+descriptive(dat.describe$Hospitalized)
+```
+
+**Readmitted**
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, cache=TRUE}
+descriptive(dat.describe$`Readmission to hospital`)
+```
+
+###Continuous predictors
+
+**Age**
+```{r, message=FALSE, warning=FALSE, echo=FALSE, cache=TRUE}
+summary(dat.full$Age)
+```
+
+**Days under treatment**
+```{r, message=FALSE, warning=FALSE, echo=FALSE, cache=TRUE}
+summary(dat.full$`Days under treatment`)
+```
+
+**Days to hospitalization** 
+```{r, message=FALSE, warning=FALSE, echo=FALSE, cache=TRUE}
+summary(dat.full$`Days to hospitalization`)
+```
+*NA's account for the number of patients who did not get hospitalized.*
+
+
+##Logistic model results 
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, cache=TRUE}
+readmit.odds
+```
+
+
+
+
